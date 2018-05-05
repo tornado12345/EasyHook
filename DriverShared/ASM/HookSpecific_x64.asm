@@ -32,6 +32,13 @@ public StealthStub_ASM_x64
 StealthStub_ASM_x64 PROC
 	sub			rsp, 8 * 4
 	
+; save stack before call to CreateThread
+	mov			r10, qword ptr[rsp + 40]
+	mov			qword ptr[rbx + 64 + 8 * 19], r10
+	mov			r10, qword ptr[rsp + 32]
+	mov			qword ptr[rbx + 64 + 8 * 18], r10
+
+; CreateThread
 	mov			qword ptr[rsp + 40], 0
 	mov			qword ptr[rsp + 32], 0
 	mov			r9, qword ptr [rbx + 16]	; RemoteThreadParam
@@ -41,6 +48,15 @@ StealthStub_ASM_x64 PROC
 	call		qword ptr[rbx]				; CreateThread
 	cmp			rax, 0
 
+; restore stack after call to CreateThread
+	mov			rdx, rsp
+	add			rdx, 20h
+	mov			rcx, qword ptr[rbx + 64 + 8 * 18]
+	mov			qword ptr[rdx], rcx
+	add			rdx, 8
+	mov			rcx, qword ptr[rbx + 64 + 8 * 19]
+	mov			qword ptr[rdx], rcx
+
 ; signal completion
 	mov			rcx, qword ptr [rbx + 48]		
 	mov			qword ptr [rbx + 48], rax
@@ -48,8 +64,8 @@ StealthStub_ASM_x64 PROC
 
 ; wait for completion
 	mov			rdx, -1
-	mov			rcx, qword ptr [ebx + 32]
-	call		qword ptr [ebx + 24]		; WaitForSingleObject(hCompletionEvent, INFINITE)	
+	mov			rcx, qword ptr [rbx + 32]
+	call		qword ptr [rbx + 24]		; WaitForSingleObject(hCompletionEvent, INFINITE)	
 
 ; close handle
 	mov			rcx, qword ptr [rbx + 32]		
@@ -168,6 +184,11 @@ IsExecutedPtr:
 	db 0
 	
 ; ATTENTION: 64-Bit requires stack alignment (RSP) of 16 bytes!!
+	; Apply alignment trick: https://stackoverflow.com/a/9600102
+	push rsp
+	push [rsp]
+	and rsp, 0FFFFFFFFFFFFFFF0H
+	
 	mov rax, rsp
 	push rcx ; save not sanitized registers...
 	push rdx
@@ -209,8 +230,9 @@ CALL_NET_ENTRY:
 	
 ; call NET intro
 	lea rcx, [IsExecutedPtr + 8] ; Hook handle (only a position hint)
-	mov rdx, qword ptr [rsp + 32 + 4 * 16 + 4 * 8] ; push return address
-	lea r8, qword ptr [rsp + 32 + 4 * 16 + 4 * 8] ; push address of return address
+	; Here we are under the alignment trick.
+	mov r8, [rsp + 32 + 4 * 16 + 4 * 8 + 8] ; r8 = original rsp (address of return address)
+	mov rdx, [r8] ; return address (value stored in original rsp)
 	call qword ptr [NETIntro] ; Hook->NETIntro(Hook, RetAddr, InitialRSP);
 	
 ; should call original method?
@@ -231,7 +253,9 @@ CALL_NET_ENTRY:
 CALL_HOOK_HANDLER:
 ; adjust return address
 	lea rax, [CALL_NET_OUTRO]
-	mov qword ptr [rsp + 32 + 4 * 16 + 4 * 8], rax
+	; Here we are under the alignment trick.
+	mov r9, [rsp + 32 + 4 * 16 + 4 * 8 + 8] ; r9 = original rsp
+	mov qword ptr [r9], rax
 
 ; call hook handler
 	lea rax, [NewProc]
@@ -240,6 +264,8 @@ CALL_HOOK_HANDLER:
 CALL_NET_OUTRO: ; this is where the handler returns...
 
 ; call NET outro
+	; Here we are NOT under the alignment trick.
+	
 	push 0 ; space for return address
 	push rax
 	
@@ -277,6 +303,9 @@ TRAMPOLINE_EXIT:
 	pop r8
 	pop rdx
 	pop rcx
+	
+	; Remove alignment trick: https://stackoverflow.com/a/9600102
+	mov rsp, [rsp + 8]
 	
 	jmp qword ptr[rax] ; ATTENTION: In case of hook handler we will return to CALL_NET_OUTRO, otherwise to the caller...
 	
